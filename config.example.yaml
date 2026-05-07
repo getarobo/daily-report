@@ -1,0 +1,71 @@
+# daily-report config — copy to config.yaml (gitignored) and fill in.
+# See README.md for one-time setup (OAuth, Telegram bot, Anthropic API key).
+
+schedule:
+  hour: 8
+  minute: 0
+  tz: Asia/Seoul
+
+oauth:
+  scopes:
+    gmail: ["https://www.googleapis.com/auth/gmail.readonly"]
+    gcal:  ["https://www.googleapis.com/auth/calendar.readonly"]
+
+accounts:
+  - id: gene-personal
+    type: gmail
+    bucket: personal
+    email: you@gmail.com               # <-- replace
+    primary_tab_only: true
+  - id: gene-work
+    type: gmail
+    bucket: work
+    email: you@your-workspace.com      # <-- replace
+    primary_tab_only: false            # Workspace has no Primary tab
+
+calendars:
+  - id: gcal-personal
+    type: gcal
+    bucket: personal
+    account_ref: gene-personal
+  - id: gcal-work
+    type: gcal
+    bucket: work
+    account_ref: gene-work
+  - id: icloud
+    type: icloud
+    bucket: personal
+    calendar_names: ["Personal"]       # <-- replace with real calendar names
+
+telegram:
+  chat_id_env: TELEGRAM_CHAT_ID         # set in .env (non-secret routing)
+  bot_token_keyring: telegram-bot
+
+llm:
+  # We call Claude via the local `claude -p` CLI (Claude Code), not the
+  # Anthropic SDK — billing flows through your Claude Team seat, no API
+  # key required. The classifier always passes --model so this stays pinned.
+  model: claude-haiku-4-5-20251001
+
+importance:
+  personal:
+    confidence_threshold: 0.4          # recall-leaning; Primary tab pre-filters noise
+    always_flag: ["calendar invite", "reply from human", "deadline today"]
+    never_flag:  ["newsletter", "receipt", "GitHub notification", "automated alert"]
+  work:
+    confidence_threshold: 0.6          # higher bar; Workspace has no Primary tab
+    always_flag: ["calendar invite", "reply from human", "deadline today", "EOD", "urgent"]
+    never_flag:
+      - "newsletter"
+      - "receipt"
+      - "GitHub notification"
+      - "automated alert"
+      - "Slack notification"
+      - "Jira notification"
+      - "Confluence notification"
+      - "HR bulletin"
+      - "IT bulletin"
+      - "build/deploy notification"
+
+healthcheck:
+  stale_threshold_minutes: 30          # if state.last_run_ts older than this at 08:10, ping

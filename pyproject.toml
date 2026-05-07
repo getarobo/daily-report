@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "daily-report"
+version = "0.1.0"
+description = "Personal daily-briefing bot: Gmail + Google Calendar + iCloud Calendar -> Telegram digest at 08:00 KST."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Gene Han", email = "gene@smtown.com" }]
+license = { text = "Proprietary" }
+dependencies = [
+    "google-api-python-client>=2.140",
+    "google-auth>=2.34",
+    "google-auth-oauthlib>=1.2",
+    # Note: no `anthropic` SDK. We call Claude Haiku via the local `claude -p`
+    # CLI so the daily run bills against the user's Claude Team seat instead
+    # of requiring a separate Anthropic API key. See classifier.py docstring.
+    "python-telegram-bot>=21.6",
+    "keyring>=24.0",
+    "pyyaml>=6.0",
+    "pydantic>=2.8",
+    "pydantic-settings>=2.5",
+    "tenacity>=9.0",
+    # iCloud calendar via the icalendar-sync skill (path dep, library import).
+    # See README "Setup" for what to do if this path is not present.
+    "openclaw-icalendar-sync @ file:///Users/genehan/.openclaw/workspace/skills/icalendar-sync",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "vcrpy>=6.0",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+daily-report = "daily_report.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["daily_report*"]
+exclude = ["tests*", "ops*", ".omc*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

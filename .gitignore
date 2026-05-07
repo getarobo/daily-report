@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.eggs/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Local config & secrets
+config.yaml
+.env
+.env.local
+
+# OMC runtime state — keep plans/research, ignore session/runtime.
+**/.omc/state/
+**/.omc/sessions/
+**/.omc/project-memory.json
+**/.omc/logs/
+
+# Local logs
+*.log
