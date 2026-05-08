@@ -1,3 +1,5 @@
+Version 0.2.0.0 - 2026-05-08
+
 # daily-report
 
 Personal daily-briefing bot. Pulls **Gmail** (personal + work), **Google Calendar** (×2), and **iCloud Calendar**, classifies importance with **Claude Haiku 4.5**, and posts a 2-section + ⚠️ Action-needed digest to **Telegram** every morning at 08:00 KST via `launchd`.
