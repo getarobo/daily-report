@@ -1,10 +1,14 @@
-"""Google Calendar fetcher — today-only window, skips working-location events."""
+"""Google Calendar fetcher — today + early-morning tomorrow (until next 08:30 run).
+
+Skips working-location events.
+"""
 
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, time, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
@@ -61,10 +65,12 @@ def _fetch_calendar_events(
 
     service = build("calendar", "v3", credentials=creds, cache_discovery=False)
 
-    now = datetime.now(UTC)
-    # today 00:00 UTC to end-of-today UTC
-    time_min = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    time_max = time_min + timedelta(days=1)
+    # Window: today 00:00 KST → tomorrow 08:30 KST (right before the next run).
+    # Catches early-morning next-day events (e.g., 7am dentist) one digest early.
+    kst = ZoneInfo("Asia/Seoul")
+    today_kst = datetime.now(kst).date()
+    time_min = datetime.combine(today_kst, time.min, tzinfo=kst)
+    time_max = datetime.combine(today_kst + timedelta(days=1), time(8, 30), tzinfo=kst)
 
     response = (
         service.events()

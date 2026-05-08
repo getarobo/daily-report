@@ -103,7 +103,13 @@ def _fetch_by_history(
     messages_raw: list[dict] = []
     for record in response.get("history", []):
         for m in record.get("messagesAdded", []):
-            messages_raw.append(m.get("message", {}))
+            msg = m.get("message", {})
+            label_ids = msg.get("labelIds", [])
+            if "UNREAD" not in label_ids:
+                continue
+            if account.primary_tab_only and "CATEGORY_PERSONAL" not in label_ids:
+                continue
+            messages_raw.append(msg)
 
     new_history_id: str | None = response.get("historyId")
     messages = _fetch_message_details(service, account, messages_raw)
