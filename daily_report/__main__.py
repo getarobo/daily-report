@@ -97,30 +97,23 @@ def _cmd_run(args: argparse.Namespace) -> int:
     icloud_events = fetch_icloud(cfg.calendars)
 
     # ------------------------------------------------------------------
-    # Classify
+    # Compose briefing (single LLM call — openclaw-style prose)
     # ------------------------------------------------------------------
-    from daily_report.classifier import classify_items
+    from daily_report.classifier import generate_briefing, split_for_telegram
 
-    for account_id, msgs in emails.items():
-        # Determine bucket from account config
-        account = next((a for a in cfg.accounts if a.id == account_id), None)
-        bucket = account.bucket if account else "personal"
-        classify_items(msgs, bucket, cfg)
+    try:
+        briefing = generate_briefing(emails, gcal_events, icloud_events, cfg)
+    except Exception as exc:  # noqa: BLE001
+        msg = f"daily-report briefing failed: {exc}"
+        logging.getLogger(__name__).exception("Briefing generation failed")
+        if not args.dry_run:
+            from daily_report.notify.telegram import send_error
 
-    for cal_id, evts in gcal_events.items():
-        cal = next((c for c in cfg.calendars if c.id == cal_id), None)
-        bucket = cal.bucket if cal else "personal"
-        classify_items(evts, bucket, cfg)
+            send_error(msg, cfg)
+        print(f"ERROR: {msg}", file=sys.stderr)
+        return 1
 
-    for _cal_id, evts in icloud_events.items():
-        classify_items(evts, "personal", cfg)
-
-    # ------------------------------------------------------------------
-    # Render
-    # ------------------------------------------------------------------
-    from daily_report.digest import render_digest
-
-    messages = render_digest(emails, gcal_events, icloud_events)
+    messages = split_for_telegram(briefing)
 
     # ------------------------------------------------------------------
     # Output / send
@@ -135,7 +128,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         from daily_report.notify.telegram import send_messages
 
         send_messages(messages, cfg)
-        logging.getLogger(__name__).info("Digest sent to Telegram (%d message(s)).", len(messages))
+        logging.getLogger(__name__).info("Briefing sent to Telegram (%d message(s)).", len(messages))
 
     # ------------------------------------------------------------------
     # Update state

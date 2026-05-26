@@ -7,14 +7,14 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/genehan/projects/claudehome-projects/daily-report/.venv/bin/python</string>
+        <string>/Users/genehan/projects/claudehome-projects/gene-mini_suite/daily-report/.venv/bin/python</string>
         <string>-m</string>
         <string>daily_report</string>
         <string>healthcheck</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/genehan/projects/claudehome-projects/daily-report</string>
+    <string>/Users/genehan/projects/claudehome-projects/gene-mini_suite/daily-report</string>
 
     <key>EnvironmentVariables</key>
     <dict>

@@ -1,11 +1,13 @@
-"""Importance classifier — calls Claude Haiku 4.5 via the Claude Code CLI.
+"""Briefing generator — calls Claude (Haiku 4.5 by default) via the Claude Code CLI.
 
 Why subprocess to ``claude -p`` instead of the Anthropic SDK:
 the user is on a Claude Team subscription and does not have a separate
 Anthropic API key. ``claude -p`` uses the locally-logged-in Claude Code
-session, billing the call against the user's Team seat.
+session, billing against the user's Team seat.
 
-Returns per-item: {flag: bool, summary: str, confidence: float}.
+Single call: takes the day's fetched emails + calendar events and returns
+the final Telegram-HTML briefing as one string. No per-item JSON contract;
+Python is no longer in the rendering business.
 """
 
 from __future__ import annotations
@@ -15,66 +17,92 @@ import logging
 import os
 import shutil
 import subprocess
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from daily_report.config import AppConfig, BucketImportanceConfig
+from daily_report.config import AppConfig
 
 log = logging.getLogger(__name__)
 
-_CLI_TIMEOUT_SEC = 120
+_CLI_TIMEOUT_SEC = 180
+_TELEGRAM_MAX_CHARS = 4000  # hard limit is 4096; leave headroom for any wrapper text
+_KST = ZoneInfo("Asia/Seoul")
 
+_HINTS_SLOT = "__BUCKET_HINTS__"
 
-# ---------------------------------------------------------------------------
-# System prompt (passed via ``--system-prompt``; Claude Code caches it server-side)
-# ---------------------------------------------------------------------------
+_SYSTEM_PROMPT = f"""\
+You are the user's morning briefing assistant. You receive raw email and
+calendar data and write a single, scannable briefing the user reads on their
+phone over coffee. Delivered as a Telegram HTML message.
 
-_SYSTEM_PROMPT_TEMPLATE = """\
-You are a personal email and calendar triage assistant. Your job is to decide
-whether each item (email or calendar event) warrants the user's *immediate*
-attention today, and to write a concise one-line summary.
+## Voice
+Direct, opinionated, no hedging. You read the inbox FOR them — skim noise
+into one-line groupings, spell out anything needing a decision. Match the
+source language: Korean subject → Korean summary. Never translate.
 
-## Classification rules
+## Output structure (omit any section that has no content)
 
-**Always flag (confidence >= 0.9):**
-{always_flag_list}
+1. Header line: <b>☀️ MORNING BRIEF — Weekday, Month Day, Year</b>
+   Use the DATE provided in the input.
+2. <b>⚠️ URGENT</b> — items needing action TODAY, regardless of bucket.
+   For each urgent item, write:
+     • a bold one-line summary,
+     • a short paragraph of context that ALWAYS names the source —
+       which mailbox (thefightingbee@gmail.com / gene@smtown.com) for
+       emails, or which calendar (Google Calendar work / iCloud) for
+       events. The user must never have to guess where an item came from.
+     • → <b>Action needed:</b> one sentence.
+3. <b>💼 WORK (gene@smtown.com)</b>
+   - Gmail first. WITHIN the Gmail block, ORDER MATTERS:
+     (a) Actionable but not-urgent-enough-for-the-top items go FIRST,
+         one per line, each with a one-line summary of what's needed.
+     (b) THEN group the remaining noise into one-line categories like
+         "<b>Promos:</b> A, B, C", "<b>Newsletters:</b> X, Y",
+         "<b>Notifications:</b> ...".
+   - Then "<b>Google Calendar:</b>" followed by today's events, or
+     "No events today."
+4. <b>📬 PERSONAL (thefightingbee@gmail.com)</b>
+   - Gmail first, same (a) actionable → (b) grouped noise order.
+   - Then "<b>iCloud Calendar:</b>" followed by today's events, or
+     "No events today."
+5. <b>TL;DR:</b> one or two sentences naming the day's single most important
+   thing — or "Nothing urgent today."
 
-**Never flag (confidence = 0.0):**
-{never_flag_list}
+## Urgent = today-decision-required
+Reply from a human asking a question, calendar invite for today, subject
+mentioning "deadline / today / EOD / urgent / now", account suspension,
+billing failure, security alert from a real service.
 
-**General guidelines:**
-- A reply from a known human → flag.
-- A calendar invite or event scheduled today → flag.
-- A subject mentioning "deadline", "today", "EOD", "urgent", or a specific time today → flag.
-- Mass mail, promotional email, newsletters → do NOT flag.
-- Receipts, shipping notifications, order confirmations → do NOT flag.
-- Automated system alerts (GitHub, Jira, Slack, CI/CD, monitoring) → do NOT flag.
-- When uncertain, err on the side of flagging (recall > precision).
+## Never urgent
+Newsletters, digests, promos, receipts, shipping/order confirmations,
+GitHub / Jira / Slack / CI / monitoring noise, LinkedIn notifications.
 
-**Language:** Write the summary in the SAME language as the source. If the
-subject/snippet is Korean, the summary must be Korean. If English, English.
-Never translate; preserve the original language so the user reads it natively.
+{_HINTS_SLOT}
 
-## Output format
-
-Respond with ONLY a JSON array (one object per item, in the same order):
-[
-  {{"flag": true|false, "summary": "one-line summary <= 80 chars", "confidence": 0.0-1.0}},
-  ...
-]
-
-Do not include any text outside the JSON array. Do not wrap the JSON in ```code fences.
+## Formatting
+Telegram HTML only — use ONLY <b>, <i>, <code>. Do not use any other tag.
+Separate top-level sections with a line containing just "---". Output ONLY
+the briefing HTML — no preamble, no closing remarks, no markdown code fences.
 """
 
 
-def _build_system_prompt(bucket_cfg: BucketImportanceConfig) -> str:
-    always_list = "\n".join(f"- {x}" for x in bucket_cfg.always_flag)
-    never_list = "\n".join(f"- {x}" for x in bucket_cfg.never_flag)
-    return _SYSTEM_PROMPT_TEMPLATE.format(
-        always_flag_list=always_list or "(none defined)",
-        never_flag_list=never_list or "(none defined)",
+def _build_system_prompt(cfg: AppConfig) -> str:
+    rules: list[str] = []
+    for name, bucket_cfg in (
+        ("work", cfg.importance.work),
+        ("personal", cfg.importance.personal),
+    ):
+        if bucket_cfg.always_flag:
+            rules.append(f"In {name}, also treat as urgent: " + ", ".join(bucket_cfg.always_flag) + ".")
+        if bucket_cfg.never_flag:
+            rules.append(f"In {name}, never urgent: " + ", ".join(bucket_cfg.never_flag) + ".")
+    hints_block = (
+        "## Per-bucket rules from user config\n" + "\n".join(rules) if rules else ""
     )
+    return _SYSTEM_PROMPT.replace(_HINTS_SLOT, hints_block)
 
 
 # ---------------------------------------------------------------------------
@@ -82,59 +110,67 @@ def _build_system_prompt(bucket_cfg: BucketImportanceConfig) -> str:
 # ---------------------------------------------------------------------------
 
 
-def classify_items(
-    items: list[dict[str, Any]],
-    bucket: str,
+def generate_briefing(
+    emails: dict[str, list[dict[str, Any]]],
+    gcal_events: dict[str, list[dict[str, Any]]],
+    icloud_events: dict[str, list[dict[str, Any]]],
     cfg: AppConfig,
-) -> list[dict[str, Any]]:
-    """Classify a list of email/event dicts for the given bucket.
+) -> str:
+    """Generate the final Telegram-HTML briefing in one LLM call.
 
-    If the ``claude`` CLI is not installed or the call fails, returns the
-    input unchanged with flag=False — the digest still renders, just unranked.
+    Raises RuntimeError on any LLM failure — the caller decides whether to
+    send an error message to Telegram.
     """
-    if not items:
-        return items
-
-    bucket_cfg: BucketImportanceConfig | None = getattr(cfg.importance, bucket, None)
-    if bucket_cfg is None:
-        log.warning("Unknown bucket %r — using defaults", bucket)
-        bucket_cfg = BucketImportanceConfig()
+    total = (
+        sum(len(v) for v in emails.values())
+        + sum(len(v) for v in gcal_events.values())
+        + sum(len(v) for v in icloud_events.values())
+    )
+    if total == 0:
+        return _empty_briefing()
 
     if shutil.which("claude") is None:
-        log.warning("`claude` CLI not on PATH — falling back to raw digest")
-        return _fallback_classify(items)
+        raise RuntimeError("`claude` CLI not on PATH — cannot generate briefing")
 
-    try:
-        results = _call_classifier(items, bucket_cfg, cfg)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Classifier failed (%s) — falling back to raw digest", exc)
-        return _fallback_classify(items)
+    user_message = _format_input(emails, gcal_events, icloud_events, cfg)
+    system_prompt = _build_system_prompt(cfg)
+    return _call_claude(system_prompt, user_message, cfg)
 
-    for item, result in zip(items, results, strict=True):
-        threshold = bucket_cfg.confidence_threshold
-        item["flag"] = result.get("flag", False) and result.get("confidence", 0.0) >= threshold
-        item["confidence"] = result.get("confidence", 0.0)
-        llm_summary = result.get("summary", "")
-        # Events arrive with a meaningful calendar title in `summary` — don't
-        # clobber it. Stash the LLM's one-liner in `note` instead.
-        if "dtstart" in item:
-            item["note"] = llm_summary
+
+def split_for_telegram(briefing: str, max_chars: int = _TELEGRAM_MAX_CHARS) -> list[str]:
+    """Split a long briefing into Telegram-sized chunks.
+
+    Prefers splitting at "\\n---\\n" separator lines. Telegram's hard limit
+    is 4096 chars per message; we leave headroom.
+    """
+    if len(briefing) <= max_chars:
+        return [briefing]
+
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    sep = "\n---\n"
+    for block in briefing.split(sep):
+        block_len = len(block) + len(sep)
+        if current and current_len + block_len > max_chars:
+            chunks.append(sep.join(current))
+            current = [block]
+            current_len = block_len
         else:
-            item["summary"] = llm_summary or item.get("subject") or ""
+            current.append(block)
+            current_len += block_len
+    if current:
+        chunks.append(sep.join(current))
+    return chunks
 
-    return items
+
+# ---------------------------------------------------------------------------
+# Internals
+# ---------------------------------------------------------------------------
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-def _call_classifier(
-    items: list[dict[str, Any]],
-    bucket_cfg: BucketImportanceConfig,
-    cfg: AppConfig,
-) -> list[dict[str, Any]]:
-    """Invoke ``claude -p`` and parse the JSON envelope it prints."""
-    system_prompt = _build_system_prompt(bucket_cfg)
-    user_message = _format_items(items)
-
+def _call_claude(system_prompt: str, user_message: str, cfg: AppConfig) -> str:
     cmd = [
         "claude",
         "-p",
@@ -144,19 +180,20 @@ def _call_classifier(
         system_prompt,
         "--output-format",
         "json",
-        # Don't persist these one-off classification sessions.
         "--no-session-persistence",
-        # Hard cap to keep a runaway from chewing the seat.
         "--max-budget-usd",
         "1",
         user_message,
     ]
-
-    # Strip OMC noise so the cron run is clean and reproducible.
     env = os.environ.copy()
     env["DISABLE_OMC"] = "1"
 
-    log.debug("Invoking claude CLI with %d items in bucket %s", len(items), bucket_cfg)
+    log.debug(
+        "Invoking claude CLI for briefing (system=%d ch, user=%d ch)",
+        len(system_prompt),
+        len(user_message),
+    )
+
     proc = subprocess.run(
         cmd,
         capture_output=True,
@@ -177,50 +214,119 @@ def _call_classifier(
     if envelope.get("is_error"):
         raise RuntimeError(f"claude -p reported error: {envelope.get('result', '<no msg>')}")
 
-    raw_text = (envelope.get("result") or "").strip()
-    if not raw_text:
+    text = (envelope.get("result") or "").strip()
+    if not text:
         raise RuntimeError("claude -p returned empty result")
 
-    # Strip a stray ```json fence if Claude added one despite the instruction.
-    if raw_text.startswith("```"):
-        raw_text = raw_text.strip("`")
-        if raw_text.lower().startswith("json"):
-            raw_text = raw_text[4:].lstrip()
-
-    try:
-        parsed = json.loads(raw_text)
-    except json.JSONDecodeError as exc:
-        log.warning("Classifier returned non-JSON: %r", raw_text[:200])
-        raise RuntimeError(f"Non-JSON inner response: {exc}") from exc
-
-    if not isinstance(parsed, list) or len(parsed) != len(items):
-        raise RuntimeError(
-            f"Classifier returned {len(parsed) if isinstance(parsed, list) else type(parsed)} "
-            f"items for {len(items)} inputs"
-        )
-
-    return parsed
+    return _strip_code_fence(text)
 
 
-def _format_items(items: list[dict[str, Any]]) -> str:
-    user_lines = []
-    for i, item in enumerate(items, 1):
-        title = item.get("subject") or item.get("summary", "(no title)")
-        sender = item.get("sender", "")
-        snippet = item.get("snippet") or item.get("description", "")
-        parts = [f"Item {i}: {title}"]
-        if sender:
-            parts.append(f"From: {sender}")
-        if snippet:
-            parts.append(f"Snippet: {snippet[:300]}")
-        user_lines.append("\n".join(parts))
-    return "\n\n---\n\n".join(user_lines)
+def _strip_code_fence(text: str) -> str:
+    if not text.startswith("```"):
+        return text
+    lines = text.splitlines()
+    if lines and lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].startswith("```"):
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
 
 
-def _fallback_classify(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Non-LLM fallback: no flagging, use subject/summary as-is."""
-    for item in items:
-        item.setdefault("flag", False)
-        item.setdefault("summary", item.get("subject") or item.get("summary", ""))
-        item.setdefault("confidence", 0.0)
-    return items
+def _empty_briefing() -> str:
+    date_str = datetime.now(_KST).strftime("%A, %B %-d, %Y")
+    return f"<b>☀️ MORNING BRIEF — {date_str}</b>\n\nNo new mail or events today."
+
+
+def _format_input(
+    emails: dict[str, list[dict[str, Any]]],
+    gcal_events: dict[str, list[dict[str, Any]]],
+    icloud_events: dict[str, list[dict[str, Any]]],
+    cfg: AppConfig,
+) -> str:
+    date_str = datetime.now(_KST).strftime("%A, %B %-d, %Y")
+    sections: list[str] = [f"DATE: {date_str}"]
+
+    accounts_by_id = {a.id: a for a in cfg.accounts}
+    work_gmail_ids = [a.id for a in cfg.accounts if a.type == "gmail" and a.bucket == "work"]
+    personal_gmail_ids = [a.id for a in cfg.accounts if a.type == "gmail" and a.bucket == "personal"]
+    work_gcal_ids = [c.id for c in cfg.calendars if c.type == "gcal" and c.bucket == "work"]
+    personal_gcal_ids = [c.id for c in cfg.calendars if c.type == "gcal" and c.bucket == "personal"]
+
+    sections.append(_format_email_section("WORK GMAIL", work_gmail_ids, emails, accounts_by_id))
+    sections.append(_format_event_section("WORK GOOGLE CALENDAR (today)", work_gcal_ids, gcal_events))
+    sections.append(_format_email_section("PERSONAL GMAIL", personal_gmail_ids, emails, accounts_by_id))
+    sections.append(
+        _format_event_section("PERSONAL GOOGLE CALENDAR (today)", personal_gcal_ids, gcal_events)
+    )
+    sections.append(_format_icloud_section(icloud_events))
+
+    return "\n\n".join(sections)
+
+
+def _format_email_section(
+    label: str,
+    account_ids: list[str],
+    emails: dict[str, list[dict[str, Any]]],
+    accounts_by_id: dict[str, Any],
+) -> str:
+    lines = [f"=== {label} ==="]
+    if not account_ids:
+        lines.append("(no accounts configured for this bucket)")
+        return "\n".join(lines)
+
+    for aid in account_ids:
+        items = emails.get(aid) or []
+        acc = accounts_by_id.get(aid)
+        email_label = acc.email if acc else aid
+        lines.append(f"-- {email_label} ({len(items)} unread) --")
+        if not items:
+            lines.append("(none)")
+            continue
+        for i, item in enumerate(items, 1):
+            sender = item.get("sender", "")
+            subject = item.get("subject", "(no subject)")
+            snippet = (item.get("snippet") or "").strip()[:300]
+            parts = [f"{i}. From: {sender} | Subject: {subject}"]
+            if snippet:
+                parts.append(f"Snippet: {snippet}")
+            lines.append(" | ".join(parts))
+    return "\n".join(lines)
+
+
+def _format_event_section(
+    label: str,
+    calendar_ids: list[str],
+    events: dict[str, list[dict[str, Any]]],
+) -> str:
+    lines = [f"=== {label} ==="]
+    total = 0
+    for cid in calendar_ids:
+        items = events.get(cid) or []
+        total += len(items)
+        for evt in items:
+            lines.append(_format_event_line(evt))
+    if total == 0:
+        lines.append("(none)")
+    return "\n".join(lines)
+
+
+def _format_icloud_section(icloud_events: dict[str, list[dict[str, Any]]]) -> str:
+    lines = ["=== PERSONAL ICLOUD CALENDAR (today) ==="]
+    total = 0
+    for items in icloud_events.values():
+        total += len(items)
+        for evt in items:
+            lines.append(_format_event_line(evt))
+    if total == 0:
+        lines.append("(none)")
+    return "\n".join(lines)
+
+
+def _format_event_line(evt: dict[str, Any]) -> str:
+    title = evt.get("summary") or "(no title)"
+    dtstart = evt.get("dtstart") or ""
+    location = (evt.get("location") or "").strip()
+    parts = [f"- {dtstart} {title}".strip()]
+    if location:
+        parts.append(f"@ {location}")
+    return " ".join(parts)

@@ -100,16 +100,14 @@ def _fetch_by_history(
             return _fetch_by_date(service, account)
         raise
 
+    # Gmail's history.list returns message stubs in messagesAdded that may
+    # or may not include labelIds — so filtering UNREAD / category here drops
+    # legitimate messages. Collect everything; _fetch_message_details applies
+    # the filter using the metadata fetch (which always carries labelIds).
     messages_raw: list[dict] = []
     for record in response.get("history", []):
         for m in record.get("messagesAdded", []):
-            msg = m.get("message", {})
-            label_ids = msg.get("labelIds", [])
-            if "UNREAD" not in label_ids:
-                continue
-            if account.primary_tab_only and "CATEGORY_PERSONAL" not in label_ids:
-                continue
-            messages_raw.append(msg)
+            messages_raw.append(m.get("message", {}))
 
     new_history_id: str | None = response.get("historyId")
     messages = _fetch_message_details(service, account, messages_raw)
@@ -156,6 +154,14 @@ def _fetch_message_details(
             detail = _get_message(service, msg_id)
         except HttpError as exc:
             log.warning("Could not fetch message %s: %s", msg_id, exc)
+            continue
+
+        # Authoritative label filter — applied here because metadata format
+        # always includes labelIds, unlike history.list message stubs.
+        label_ids = detail.get("labelIds", [])
+        if "UNREAD" not in label_ids:
+            continue
+        if account.primary_tab_only and "CATEGORY_PERSONAL" not in label_ids:
             continue
 
         headers = {
