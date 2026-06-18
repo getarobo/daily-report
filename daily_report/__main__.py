@@ -71,25 +71,25 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     try:
         emails = fetch_gmail(gmail_accounts, state)
-    except RuntimeError as exc:
-        msg = str(exc)
-        logging.getLogger(__name__).error("Gmail fetch error: %s", msg)
+    except Exception as exc:  # noqa: BLE001
+        msg = f"{type(exc).__name__}: {exc}"
+        logging.getLogger(__name__).exception("Gmail fetch error")
         if not args.dry_run:
             from daily_report.notify.telegram import send_error
 
-            send_error(msg, cfg)
+            send_error(f"Gmail fetch failed — {msg}", cfg)
         print(f"ERROR (Gmail): {msg}", file=sys.stderr)
         return 1
 
     try:
         gcal_events = fetch_gcal(cfg.calendars, cfg.accounts)
-    except RuntimeError as exc:
-        msg = str(exc)
-        logging.getLogger(__name__).error("GCal fetch error: %s", msg)
+    except Exception as exc:  # noqa: BLE001
+        msg = f"{type(exc).__name__}: {exc}"
+        logging.getLogger(__name__).exception("GCal fetch error")
         if not args.dry_run:
             from daily_report.notify.telegram import send_error
 
-            send_error(msg, cfg)
+            send_error(f"GCal fetch failed — {msg}", cfg)
         print(f"ERROR (GCal): {msg}", file=sys.stderr)
         return 1
 

@@ -9,7 +9,7 @@ from typing import Any
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from daily_report.auth import load_credentials
 from daily_report.config import AccountConfig
@@ -181,7 +181,18 @@ def _fetch_message_details(
     return results
 
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+def _is_transient(exc: BaseException) -> bool:
+    """Retry network/5xx errors but not permanent 4xx (e.g. 404 for a deleted message)."""
+    if isinstance(exc, HttpError):
+        return exc.resp.status >= 500
+    return True
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception(_is_transient),
+)
 def _get_message(service: Any, msg_id: str) -> dict:
     return (
         service.users()

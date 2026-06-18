@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1.0 — 2026-06-18
+
+- Gmail: `_get_message` no longer retries on permanent 4xx errors (e.g. 404 for a deleted message). The history API can reference messages that have since been deleted; before this fix, the 404 was retried 3× and then wrapped in `tenacity.RetryError`, which `__main__.py` failed to catch — silently crashing the morning run.
+- `__main__.py`: broaden Gmail / GCal fetch error handling from `except RuntimeError` to `except Exception`, so non-`RuntimeError` failures (including `tenacity.RetryError`) still trigger the fail-loud Telegram error message instead of dropping out silently.
+
 ## 0.3.0.0 — 2026-05-26
 
 - Briefing rewrite (openclaw-style): single LLM call generates the full Telegram briefing — header, ⚠️ URGENT cross-bucket section, WORK (Gmail → GCal), PERSONAL (Gmail → iCloud), TL;DR. Source attribution is required on every urgent item.

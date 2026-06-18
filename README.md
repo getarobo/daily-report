@@ -1,4 +1,4 @@
-Version 0.3.0.0 - 2026-05-26
+Version 0.3.1.0 - 2026-06-18
 
 # daily-report
 
