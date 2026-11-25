@@ -61,7 +61,7 @@ launchd → daily_report run
 
 ### launchd
 
-`ops/launchd/com.genehan.daily-report.plist` fires Mon–Fri 08:30 KST and Sat–Sun 10:00 KST (despite the README still saying 08:00). The healthcheck plist runs ~10 min later and pings Telegram if `state.last_run_ts` is stale. The plist's `WorkingDirectory` and `ProgramArguments` hard-code `/Users/genehan/projects/claudehome-projects/daily-report/` — if the repo is checked out elsewhere, the plist won't find `.venv`. Update both paths when relocating.
+`ops/launchd/com.genehan.daily-report.plist` fires Mon–Fri 08:30 KST and Sat–Sun 10:00 KST (despite the README still saying 08:00). The healthcheck plist runs ~10 min later and pings Telegram if `state.last_run_ts` is stale. The plist's `WorkingDirectory` and `ProgramArguments` hard-code `/Users/genehan/projects/genehome/agents/daily/daily-report/` — if the repo is checked out elsewhere, the plist won't find `.venv`. Update both paths when relocating.
 
 ### Telegram output
 
